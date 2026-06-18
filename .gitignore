@@ -1,0 +1,41 @@
+# Variables de entorno — nunca subir al repositorio
+.env
+
+# Entorno virtual de Python
+venv
+venv/
+.venv/
+env/
+
+# Caché de Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Distribución y empaquetado
+dist/
+build/
+*.egg-info/
+*.egg
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Pytest / cobertura
+.pytest_cache/
+.coverage
+htmlcov/
+
+# mypy / ruff / linters
+.mypy_cache/
+.ruff_cache/
