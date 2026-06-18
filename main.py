@@ -14,11 +14,13 @@ Variables de entorno (ver .env.example)
 ----------------------------------------
 BASE_PATH   : prefijo de ruta inyectado por el proxy inverso (ChurroStack)
 LLM_BASE_URL: URL base de la API compatible con OpenAI
-LLM_API_KEY : clave de autenticación de la API
+LLM_API_KEY : clave de autenticación de la API del LLM
 LLM_MODEL   : nombre del modelo a utilizar ("Reasoning" | "Performance")
 MAX_CHARS   : límite de caracteres enviados al LLM (por defecto 60 000)
+APP_API_KEY : clave que deben enviar los clientes en la cabecera X-API-Key
 """
 
+import json
 import logging
 import os
 import time
@@ -26,7 +28,7 @@ import uuid
 from io import BytesIO
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
 from openai import OpenAI
 from pydantic import BaseModel
 from pypdf import PdfReader
@@ -55,10 +57,13 @@ LLM_MODEL = os.environ.get("LLM_MODEL", "Reasoning")
 MAX_CHARS = int(os.environ.get("MAX_CHARS", "60000"))
 MAX_FILE_BYTES = 20 * 1024 * 1024  # 20 MB
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md", ".csv"}
+APP_API_KEY = os.environ.get("APP_API_KEY", "")
 
 # Falla en arranque para evitar errores silenciosos en la primera petición.
 if not LLM_API_KEY:
     raise RuntimeError("LLM_API_KEY no está configurada. Revisa el archivo .env.")
+if not APP_API_KEY:
+    raise RuntimeError("APP_API_KEY no está configurada. Revisa el archivo .env.")
 
 logger.info(
     "Configuracion cargada | base_url=%s | modelo=%s | max_chars=%d | api_key_presente=%s",
@@ -195,8 +200,6 @@ def parse_json(text: str) -> dict:
     json.JSONDecodeError
         Si el último objeto localizado no es sintácticamente válido.
     """
-    import json
-
     cleaned = text.strip()
     candidates: list[str] = []
     depth = 0
@@ -218,6 +221,33 @@ def parse_json(text: str) -> dict:
 
     return json.loads(candidates[-1])
 
+# ---------------------------------------------------------------------------
+# Autenticacion propia para clientes externos (no la sesion del portal)
+# ---------------------------------------------------------------------------
+ 
+def verify_api_key(x_api_key: str = Header(..., description="Clave de API propia del servicio")) -> None:
+    """Valida la cabecera ``X-API-Key`` antes de ejecutar el endpoint.
+ 
+    Se usa como dependencia de FastAPI (``Depends``): si lanza una excepcion,
+    el endpoint protegido nunca se ejecuta, asi que ningun archivo se lee ni
+    se gasta una llamada al LLM con una peticion no autorizada.
+ 
+    Parameters
+    ----------
+    x_api_key : str
+        Valor de la cabecera HTTP ``X-API-Key``. FastAPI traduce el nombre
+        del parametro (guion bajo -> guion) y la marca obligatoria con
+        ``Header(...)``; si falta, responde 422 automaticamente sin llegar
+        a ejecutar esta funcion.
+ 
+    Raises
+    ------
+    HTTPException 401
+        Si la clave enviada no coincide con la configurada en ``APP_API_KEY``.
+    """
+    if x_api_key != APP_API_KEY:
+        raise HTTPException(status_code=401, detail="API key invalida o ausente.")
+
 
 # ---------------------------------------------------------------------------
 # Endpoints
@@ -234,7 +264,7 @@ def health():
     return {"status": "ok"}
 
 
-@app.post("/analyze", summary="Analizar documento", tags=["Análisis"], response_model=AnalysisResponse)
+@app.post("/analyze", summary="Analizar documento", tags=["Análisis"], response_model=AnalysisResponse, dependencies=[Depends(verify_api_key)],)
 async def analyze(file: UploadFile = File(...)):
     """Analiza el documento subido y devuelve un resumen estructurado en JSON.
 
@@ -270,10 +300,16 @@ async def analyze(file: UploadFile = File(...)):
 
     Raises
     ------
-    - HTTPException 415: Si el formato del archivo no está soportado.
-    - HTTPException 413: Si el archivo supera el límite de tamaño permitido.
-    - HTTPException 422: Si no se pudo extraer texto del archivo (p. ej. PDF escaneado).
-    - HTTPException 502: Si la llamada al LLM falló o el modelo no devolvió JSON válido.
+    HTTPException 401
+        Si la cabecera ``X-API-Key`` es incorrecta o está ausente.
+    HTTPException 415
+        Si el formato del archivo no está soportado.
+    HTTPException 413
+        Si el archivo supera el límite de tamaño permitido.
+    HTTPException 422
+        Si no se pudo extraer texto del archivo (p. ej. PDF escaneado).
+    HTTPException 502
+        Si la llamada al LLM falló o el modelo no devolvió un JSON válido y completo.
     """
     request_id = uuid.uuid4().hex[:8]
     start_time = time.perf_counter()
